@@ -1,0 +1,14 @@
+# a Mastodon App key.
+# NOTE: you will need to update this applications auth scope by hand
+# using
+# ```postgres
+# UPDATE oauth_access_tokens
+#    SET scopes='admin:write:domain_blocks'
+#    WHERE token='_YourAppKeyHere_';
+# ```
+app_key=abcdefghij09123456789
+# the name of your mastodon pub instance.
+home=social.example.com
+# A list of hosts to pull block lists from
+remote="hachyderm.io"
+remote="soc.jrconlin.com"
