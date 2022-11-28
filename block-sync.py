@@ -37,8 +37,8 @@ def merge(old: dict[str, dict], data: list[dict]) -> dict[str, dict]:
     for item in data:
         if not item.get("domain") or not item.get("severity"):
             raise Exception("data missing required elements")
-        if "*" in item.get("domain"):
-            next
+        if '*' in item.get("domain"):
+            continue
         old[item.get("domain")] = {
             "severity": item.get("severity"),
             "comment": item.get("comment")
@@ -50,10 +50,18 @@ def fetch(sites):
     result = {}
     block_list_template = "https://{site}/api/v1/instance/domain_blocks"
     for site in sites:
+        logging.info("Fetching {site}".format(site=site))
         url = block_list_template.format(site=site)
         logging.debug(url)
         response = requests.get(block_list_template.format(site=site))
-        result = merge(result, response.json())
+        if response.status_code != 200:
+            logging.error("{site} not publishing block list".format(site=site))
+            continue
+        try:
+            result = merge(result, response.json())
+        except Exception as ex:
+            logging.error("Exception: {ex}".format(ex=ex))
+            continue
     logging.debug("{}: {} sites".format(site, len(result)))
     return result
 
@@ -87,7 +95,7 @@ def apply_diff(home, auth, diff):
             data=body
         )
         if resp.status_code == 422:
-            logging.warn(resp.text)
+            logging.warning(resp.text)
             continue
         if resp.status_code != 200:
             raise Exception(
@@ -101,7 +109,7 @@ def main():
     if args.verbose:
         level = logging.DEBUG
     else:
-        level = logging.WARN
+        level = logging.INFO
     logging.basicConfig(encoding="utf-8", level=level)
     my_data = fetch([args.home])
     # TODO: cache data to files
