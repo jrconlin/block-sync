@@ -10,5 +10,5 @@ app_key=abcdefghij09123456789
 # the name of your mastodon pub instance.
 home=social.example.com
 # A list of hosts to pull block lists from
-remote="hachyderm.io"
-remote="soc.jrconlin.com"
+remote=[hachyderm.io, ioc.exchange, fosstodon.org, infosec.exchange, queer.party, indieweb.social]
+
