@@ -31,12 +31,16 @@ def config():
     parser = configargparse.ArgParser(default_config_files=["settings.conf"])
     parser.add("-c", "--config", is_config_file=True, help="config file path")
     parser.add("-v", "--verbose", action="store_true", help="verbose mode")
+    parser.add("-q", "--quiet", action="store_true", help="only report errors")
     parser.add("--app_key", help="your server's access key", env_var="APP_KEY")
     parser.add("--dry_run", action="store_true", help="just fetch and compare")
     parser.add("--dump", help="dump the collected list of sites to specified file")
     parser.add("--home", required=True, help="your instance url", env_var="HOME_HOST")
     parser.add("--load", help="load the collected list of sites from specified file")
-    parser.add("--log_level", default="error", help="logging level [debug,info,warn,error]")
+    parser.add("--whitelist", help="allways allow these sites")
+    parser.add(
+        "--log_level", default="info", help="logging level [debug,info,warn,error]"
+    )
     parser.add(
         "--remote",
         nargs="+",
@@ -48,7 +52,7 @@ def config():
     return settings
 
 
-def merge(old: dict[str, dict], data: list[dict]) -> dict[str, dict]:
+def merge(old: dict[str, dict], data: list[dict], site: str) -> dict[str, dict]:
     """merge the new data set into the collection we've got so far"""
     for item in data:
         if not item.get("domain") or not item.get("severity"):
@@ -58,6 +62,7 @@ def merge(old: dict[str, dict], data: list[dict]) -> dict[str, dict]:
         old[item.get("domain")] = {
             "severity": item.get("severity"),
             "comment": item.get("comment"),
+            "site": site,
         }
     return old
 
@@ -75,7 +80,7 @@ def fetch(sites: list[str]) -> dict[str, dict]:
             logging.error("{site} not publishing block list".format(site=site))
             continue
         try:
-            result = merge(result, response.json())
+            result = merge(result, response.json(), site)
         except Exception as ex:
             logging.error("Exception: {ex}".format(ex=ex))
             continue
@@ -83,7 +88,9 @@ def fetch(sites: list[str]) -> dict[str, dict]:
     return result
 
 
-def compare(mine: dict[str, dict], theirs: dict[str, dict]) -> dict[str, dict]:
+def compare(
+    mine: dict[str, dict], theirs: dict[str, dict], whitelist: list[str]
+) -> dict[str, dict]:
     """find what we haven't added yet
 
     Compare both keys against each other because domains can
@@ -91,9 +98,12 @@ def compare(mine: dict[str, dict], theirs: dict[str, dict]) -> dict[str, dict]:
     """
     missing = {}
     for key in theirs.keys():
+        if key in whitelist:
+            logging.info(f"skipping whitelisted {key}")
+            continue
         use = True
         for mkey in mine:
-            if key in mkey or mkey in key:
+            if key.endswith(mkey) or mkey.endswith(key):
                 if mkey != key:
                     logging.debug(f"{mkey} == {key}")
                 use = False
@@ -101,6 +111,8 @@ def compare(mine: dict[str, dict], theirs: dict[str, dict]) -> dict[str, dict]:
         if use:
             missing[key] = theirs[key]
             logging.debug(f"++ {key}")
+    logging.info(f"Found {len(missing)} new sites")
+    logging.debug(missing)
     return missing
 
 
@@ -112,8 +124,12 @@ def apply_diff(home: str, auth: str, diff: dict[str, dict]):
         args = {
             "domain": key,
             "severity": diff.get(key).get("severity"),
-            "comment": diff.get(key).get("comment"),
+            "private_comment": "from: " + diff.get(key).get("site"),
         }
+        if diff.get(key).get("comment"):
+            args["comment"] = diff.get(key).get("comment")
+        if diff.get(key).get("site"):
+            args["private_comment"] = "from: " + diff.get(key).get("site")
         body = urlencode(args)
         logging.debug(body)
         resp = requests.post(url=url, headers={"Authorization": creds}, data=body)
@@ -125,22 +141,27 @@ def apply_diff(home: str, auth: str, diff: dict[str, dict]):
                 "Error updating blocks: {}:{}".format(resp.status_code, resp.text)
             )
 
+
 def get_log_level(args) -> int:
     """Since match isn't availabe until 3.10"""
-    level = args.log_level.strip().lower()
-    if level == "debug":
-        return logging.DEBUG
-    if level == "info" or args.verbose:
-        return logging.INFO
-    if level == "warn":
-        return logging.WARN
-    return logging.ERROR
+    result = logging.INFO
+    level = args.log_level.strip().upper()
+    try:
+        result = logging._nameToLevel.get(level, logging.INFO)
+    except Exception as ex:
+        print(ex)
+    if args.quiet:
+        result = logging.CRITICAL
+    if args.verbose:
+        result = logging.DEBUG
+    return result
 
 
 def main():
     args = config()
     level = get_log_level(args)
     logging.basicConfig(encoding="utf-8", level=level)
+    logging.debug(logging.getLevelName(level))
     my_data = fetch([args.home])
     # TODO: cache data to files
     if args.load:
@@ -152,13 +173,16 @@ def main():
         with open(args.dump, "w") as f:
             f.write(json.dumps(sites_data))
         return
-    # save_cache("sites.json", sites_data)
-    diff = compare(my_data, sites_data)
-    # save_cache("diffs.json", diff)
-    if not args.dry_run:
-        apply_diff(args.home, args.app_key, diff)
-    else:
-        print(json.dumps(diff, indent=2))
+    whitelist = []
+    if args.whitelist:
+        with open(args.whitelist, "r") as f:
+            whitelist = [x.strip() for x in f.read().split("\n")]
+    diff = compare(my_data, sites_data, whitelist)
+    if diff:
+        if not args.dry_run:
+            apply_diff(args.home, args.app_key, diff)
+        else:
+            print(json.dumps(diff, indent=2))
 
 
 main()
