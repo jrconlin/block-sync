@@ -39,12 +39,18 @@ def config():
         default_config_files=["settings.conf"],
         description=f"""Read a collection of remote sites block list and dump out a
 mastodon 4.1 compatible `domain_blocks.csv` file. Optionally
-this will also add them to your own instance. Version {VERSION}"""
-        )
+this will also add them to your own instance. Version {VERSION}""",
+    )
     parser.add("-c", "--config", is_config_file=True, help="config file path")
     parser.add("-v", "--verbose", action="store_true", help="verbose mode")
+    parser.add("-q", "--quiet", action="store_true", help="only report errors")
     parser.add("--app_key", help="your server's access key", env_var="APP_KEY")
     parser.add("--dry_run", action="store_true", help="just fetch and compare")
+    parser.add(
+        "--allow",
+        default="allow.lst",
+        help="always allow the sites listed in this file, separated by new lines",
+    )
     parser.add(
         "--output",
         default="domain_blocks.csv",
@@ -52,7 +58,8 @@ this will also add them to your own instance. Version {VERSION}"""
         help="dump the collected list of sites to specified file",
     )
     parser.add("--home", help="your instance url", env_var="HOME_HOST")
-    parser.add(        "--log_level",
+    parser.add(
+        "--log_level",
         default="error",
         env_var="LOGGING",
         help="logging level [debug,info,warn,error]",
@@ -102,7 +109,9 @@ def fetch(sites: list[str]) -> dict[str, dict]:
     return result
 
 
-def compare(mine: dict[str, dict], theirs: dict[str, dict]) -> dict[str, dict]:
+def compare(
+    mine: dict[str, dict], theirs: dict[str, dict], allow: list[str]
+) -> dict[str, dict]:
     """find what we haven't added yet
 
     Compare both keys against each other because domains can
@@ -111,9 +120,12 @@ def compare(mine: dict[str, dict], theirs: dict[str, dict]) -> dict[str, dict]:
     logging.info("Generating differences")
     missing = {}
     for key in theirs.keys():
+        if key in allow:
+            logging.info(f"skipping allowed {key}")
+            continue
         use = True
         for mkey in mine:
-            if key in mkey or mkey in key:
+            if key.endswith(mkey) or mkey.endswith(key):
                 if mkey != key:
                     logging.debug(f"{mkey} == {key}")
                 use = False
@@ -121,6 +133,8 @@ def compare(mine: dict[str, dict], theirs: dict[str, dict]) -> dict[str, dict]:
         if use:
             missing[key] = theirs[key]
             logging.debug(f"++ {key}")
+    logging.info(f"Found {len(missing)} new sites")
+    logging.debug(missing)
     return missing
 
 
@@ -130,13 +144,14 @@ def apply_diff(home: str, auth: str, diff: dict[str, dict]):
     url = f"https://{home}/api/v1/admin/domain_blocks"
     creds = f"Bearer {auth}"
     for key in diff.keys():
-        data = diff.get("key")
+        data = diff.get(key)
         args = {
             "domain": key,
-            "severity": data.get("severity"),
-            "comment": data.get("comment"),
+            "severity": data.get("severity", "suspend"),
             "private_comment": data.get("private_comment"),
         }
+        if diff.get(key).get("comment"):
+            args["comment"] = diff.get(key).get("comment")
         body = urlencode(args)
         logging.debug(body)
         resp = requests.post(url=url, headers={"Authorization": creds}, data=body)
@@ -152,17 +167,20 @@ def apply_diff(home: str, auth: str, diff: dict[str, dict]):
 
 def get_log_level(args) -> int:
     """Since match isn't availabe until 3.10"""
-    level = args.log_level.strip().lower()
-    if level == "debug":
-        return logging.DEBUG
-    if level == "info" or args.verbose:
-        return logging.INFO
-    if level == "warn":
-        return logging.WARN
-    return logging.ERROR
+    result = logging.INFO
+    level = args.log_level.strip().upper()
+    try:
+        result = logging._nameToLevel.get(level, logging.INFO)
+    except Exception as ex:
+        print(ex)
+    if args.quiet:
+        result = logging.CRITICAL
+    if args.verbose:
+        result = logging.DEBUG
+    return result
 
 
-def dump_csv(f: FileIO, sites_data: dict[str, dict]):
+def dump_csv(f: FileIO, sites_data: dict[str, dict], allow: list):
     """Dump the list as a Mastodon 4.1 compatible CSV.
 
     The `private_comment` may not import, but will show the origin of the block.
@@ -171,6 +189,9 @@ def dump_csv(f: FileIO, sites_data: dict[str, dict]):
         "#domain,#severity,#reject_media,#reject_reports,#public_comment,#obfuscate\n"
     )
     for site, data in sorted(sites_data.items(), key=lambda t: t[0]):
+        if site in allow:
+            logging.info(f"skipping allowed {site}")
+            continue
         severity = data.get("severity") or "silence"
         row = [
             site,
@@ -190,14 +211,20 @@ def main():
     my_data = {}
     logging.info("Collecting public block lists")
     sites_data = fetch(args.remote)
-
+    allow = []
+    if args.allow:
+        try:
+            with open(args.allow, "r") as f:
+                allow = [x.strip() for x in f.read().split("\n")]
+        except FileNotFoundError as e:
+            pass
     if args.output:
         logging.info(f"Outputing collected blocks to {args.output}")
         with open(args.output, "w") as f:
-            dump_csv(f, sites_data)
+            dump_csv(f, sites_data, allow)
     if args.home:
         my_data = fetch([args.home])
-        diff = compare(my_data, sites_data)
+        diff = compare(my_data, sites_data, allow)
         if not args.dry_run:
             if not args.app_key:
                 raise Exception(
@@ -208,7 +235,4 @@ def main():
         print(json.dumps(diff, indent=2))
 
 
-try:
-    main()
-except Exception as e:
-    logging.error(e)
+main()
