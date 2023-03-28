@@ -30,7 +30,7 @@ import requests
 import configargparse
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def config():
@@ -82,6 +82,9 @@ def merge(old: dict[str, dict], data: list[dict], origin: str) -> dict[str, dict
             raise Exception("data missing required elements")
         if "*" in item.get("domain"):
             continue
+        domain = re.sub("^(https?[://]+)","",item.get("domain"))
+        if domain:
+            item["domain"] = domain
         if origin:
             item["private_comment"] = f"from: {origin}"
         old[item.get("domain")] = item
@@ -98,7 +101,9 @@ def fetch(sites: list[str]) -> dict[str, dict]:
         logging.debug(url)
         response = requests.get(block_list_template.format(site=site))
         if response.status_code != 200:
-            logging.error("🚨{site} not publishing block list".format(site=site))
+            logging.error(
+                "🚨{site} not publishing block list?:{status}".format(
+                    site=site, status=response.status_code))
             continue
         try:
             result = merge(result, response.json(), site)
